@@ -1,14 +1,16 @@
 import { useRef, useState, useEffect, useMemo } from 'react'
 import { useFrame } from '@react-three/fiber'
-import { useGLTF, useAnimations, Text } from '@react-three/drei'
+import { useGLTF, Text } from '@react-three/drei'
 import { useBox, useSphere } from '@react-three/cannon'
 import { Vector3, MathUtils } from 'three'
+import Car from './Car'
 
 const CAR_SPEED = 0.75
 const LANE_CHANGE_SPEED = 0.2
 const BOOST_MULTIPLIER = 2
 const BOOST_DURATION = 3000
-const COIN_VALUE = 10
+const COIN_VALUE = 5
+const COLLISION_PENALTY = -20
 const CAMERA_DISTANCE = 15
 const CAMERA_HEIGHT = 8
 const CAMERA_LAG = 0.1
@@ -20,9 +22,11 @@ const ROAD_LENGTH = 10000
 const ROAD_WIDTH = 20
 const TREE_SPACING = 30
 const OBSTACLE_COUNT = 50
-const COIN_COUNT = 25
+const COIN_COUNT = 100
 const LANE_WIDTH = ROAD_WIDTH / 3
 const LANE_POSITIONS = [-LANE_WIDTH, 0, LANE_WIDTH] // Left, Center, Right lanes
+const GROUND_SEGMENT_LENGTH = 1000
+const GROUND_SEGMENTS = 5
 
 function Tree({ position }) {
   return (
@@ -56,11 +60,13 @@ function Coin({ position, onCollect }) {
   )
 }
 
-function Obstacle({ position }) {
+function Obstacle({ position, onCollide }) {
   const [ref] = useBox(() => ({
     type: "static",
     position,
     args: [2, 2, 2],
+    isTrigger: true,
+    onCollide: onCollide
   }))
 
   return (
@@ -73,10 +79,12 @@ function Obstacle({ position }) {
 
 function ScorePopup({ position, value }) {
   const [opacity, setOpacity] = useState(1)
+  const [yOffset, setYOffset] = useState(0)
   
   useEffect(() => {
     const fadeOut = setInterval(() => {
       setOpacity(prev => Math.max(0, prev - 0.05))
+      setYOffset(prev => prev + 0.1)
     }, 50)
     
     return () => clearInterval(fadeOut)
@@ -84,37 +92,65 @@ function ScorePopup({ position, value }) {
 
   return (
     <Text
-      position={position}
-      color="gold"
+      position={[position[0], position[1] + yOffset, position[2]]}
+      color={value > 0 ? "#4CAF50" : "#ff4444"}
       fontSize={1}
       anchorX="center"
       anchorY="middle"
       opacity={opacity}
     >
-      +{value}
+      {value > 0 ? `+${value}` : value}
     </Text>
   )
 }
 
-function GameOverScreen({ score, highScores, onRetry }) {
+function ScoreDisplay({ score, time }) {
   return (
-    <group position={[0, 5, 0]}>
-      <mesh position={[0, 0, 0]}>
-        <planeGeometry args={[20, 15]} />
+    <group position={[0, 3, 0]}>
+      <mesh position={[10, 3.6, 0]}>
+        <planeGeometry args={[5, 2]} />
         <meshBasicMaterial color="#000000" transparent opacity={0.7} />
       </mesh>
       <Text
-        position={[0, 3, 1]}
+        position={[10, 3.95, 0.1]}
+        color="white"
+        fontSize={0.7}
+        anchorX="center"
+        anchorY="middle"
+      >
+        Score: {score}
+      </Text>
+      <Text
+        position={[10, 3.2, 0.1]}
+        color="white"
+        fontSize={0.5}
+        anchorX="center"
+        anchorY="middle"
+      >
+        Time: {time}s
+      </Text>
+    </group>
+  )
+}
+
+function GameOverPopup({ score, onRetry }) {
+  return (
+    <group position={[0, 0, -10]}>
+      <mesh position={[0, 0, 0]}>
+        <planeGeometry args={[20, 15]} />
+        <meshBasicMaterial color="#000000" transparent opacity={0.8} />
+      </mesh>
+      <Text
+        position={[0, 3, 0.1]}
         color="#ff4444"
         fontSize={2}
         anchorX="center"
         anchorY="middle"
-        font="/fonts/Inter-Bold.woff"
       >
         Game Over!
       </Text>
       <Text
-        position={[0, 0, 1]}
+        position={[0, 0, 0.1]}
         color="white"
         fontSize={1.5}
         anchorX="center"
@@ -123,12 +159,11 @@ function GameOverScreen({ score, highScores, onRetry }) {
         Final Score: {score}
       </Text>
       <Text
-        position={[0, -2, 1]}
+        position={[0, -3, 0.1]}
         color="#4CAF50"
         fontSize={1.2}
         anchorX="center"
         anchorY="middle"
-        onClick={onRetry}
       >
         Press R to Retry
       </Text>
@@ -136,7 +171,27 @@ function GameOverScreen({ score, highScores, onRetry }) {
   )
 }
 
-export default function GameScene() {
+function TimerDisplay({ time }) {
+  return (
+    <group position={[15, 8, -10]}>
+      <mesh position={[0, 0, 0]}>
+        <planeGeometry args={[6, 3]} />
+        <meshBasicMaterial color="#000000" transparent opacity={0.7} />
+      </mesh>
+      <Text
+        position={[0, 0, 0.1]}
+        color="white"
+        fontSize={1.5}
+        anchorX="center"
+        anchorY="middle"
+      >
+        Time: {time}s
+      </Text>
+    </group>
+  )
+}
+
+export default function GameScene({ selectedCar }) {
   const carRef = useRef()
   const cameraRef = useRef({
     position: new Vector3(0, CAMERA_HEIGHT, CAMERA_DISTANCE),
@@ -155,22 +210,31 @@ export default function GameScene() {
     return saved ? JSON.parse(saved) : []
   })
   const [collisionCooldown, setCollisionCooldown] = useState(false)
+  const [timerActive, setTimerActive] = useState(false)
 
-  // Load car model and setup environment
-  const { scene: carScene } = useGLTF('/models/car.glb')
-  
-  useEffect(() => {
-    carScene.traverse((child) => {
-      if (child.isMesh) {
-        child.castShadow = true
-        child.receiveShadow = true
-        if (child.material) {
-          child.material.envMapIntensity = 1.5
-          child.material.needsUpdate = true
-        }
+  // Physics for car
+  const [carBody, api] = useBox(() => ({
+    mass: 1000,
+    position: carPosition,
+    rotation: [0, Math.PI, 0],
+    args: [2, 1, 4],
+    linearDamping: 0.95,
+    angularDamping: 0.95,
+    onCollide: (e) => {
+      if (e.body.userData?.isObstacle && !collisionCooldown) {
+        setCollisionCooldown(true)
+        setScore(prev => prev + COLLISION_PENALTY)
+        setScorePopups(prev => [...prev, {
+          id: Date.now(),
+          position: [...carPosition],
+          value: COLLISION_PENALTY
+        }])
+        setSpeed(0)
+        api.velocity.set(0, 0, 0)
+        setTimeout(() => setCollisionCooldown(false), COLLISION_COOLDOWN)
       }
-    })
-  }, [carScene])
+    }
+  }))
 
   // Game timer
   useEffect(() => {
@@ -183,6 +247,25 @@ export default function GameScene() {
       endGame()
     }
   }, [gameTime, gameOver])
+
+  // Start timer when car loads
+  useEffect(() => {
+    if (selectedCar && !timerActive) {
+      setTimerActive(true)
+      const timer = setInterval(() => {
+        setGameTime(prev => {
+          if (prev <= 0) {
+            clearInterval(timer)
+            setGameOver(true)
+            return 0
+          }
+          return prev - 1
+        })
+      }, 1000)
+
+      return () => clearInterval(timer)
+    }
+  }, [selectedCar, timerActive])
 
   const endGame = () => {
     setGameOver(true)
@@ -199,6 +282,7 @@ export default function GameScene() {
     setCurrentLane(1)
     setSpeed(0)
     setScorePopups([])
+    setTimerActive(false)
   }
 
   // Generate positions for scene objects
@@ -234,25 +318,6 @@ export default function GameScene() {
     return objects
   }, [])
 
-  // Physics for car
-  const [carBody, api] = useBox(() => ({
-    mass: 1000,
-    position: carPosition,
-    rotation: [0, Math.PI / 2, 0],
-    args: [2, 1, 4],
-    linearDamping: 0.95,
-    angularDamping: 0.95,
-    onCollide: (e) => {
-      if (e.body.userData?.isObstacle && !collisionCooldown) {
-        setCollisionCooldown(true)
-        setSpeed(0)
-        api.velocity.set(0, 0, 0)
-        endGame()
-        setTimeout(() => setCollisionCooldown(false), COLLISION_COOLDOWN)
-      }
-    }
-  }))
-
   const keys = useRef({
     forward: false,
     backward: false,
@@ -264,10 +329,11 @@ export default function GameScene() {
   useFrame((state, delta) => {
     if (!carRef.current || gameOver) return
 
-    let currentSpeed = speed
-    if (boostActive) {
-      currentSpeed *= BOOST_MULTIPLIER
-    }
+    // Update car position based on controls
+    let targetSpeed = keys.current.forward ? CAR_SPEED : keys.current.backward ? -CAR_SPEED : 0
+    if (boostActive && keys.current.forward) targetSpeed *= BOOST_MULTIPLIER
+    
+    setSpeed(MathUtils.lerp(speed, targetSpeed, 0.1))
 
     // Handle lane changes with sequential transitions
     const targetX = LANE_POSITIONS[currentLane]
@@ -275,42 +341,42 @@ export default function GameScene() {
     const newX = MathUtils.lerp(currentX, targetX, LANE_CHANGE_SPEED)
     
     // Update car position
-    const newZ = carPosition[2] + currentSpeed
-    setCarPosition([newX, carPosition[1], newZ])
-    api.position.set(newX, carPosition[1], newZ)
+    const newPosition = [newX, carPosition[1], carPosition[2] - speed]
+    setCarPosition(newPosition)
+    api.position.set(...newPosition)
 
-    // Update camera
-    const idealCameraPos = new Vector3(
-      newX,
+    // Update camera position
+    const cameraIdealPosition = new Vector3(
+      newPosition[0],
       CAMERA_HEIGHT,
-      newZ - CAMERA_DISTANCE
+      newPosition[2] + CAMERA_DISTANCE
     )
-    cameraRef.current.position.lerp(idealCameraPos, CAMERA_LAG)
+    
+    cameraRef.current.position.lerp(cameraIdealPosition, CAMERA_LAG)
+    cameraRef.current.target.lerp(new Vector3(newPosition[0], 0, newPosition[2]), CAMERA_LAG)
+    
     state.camera.position.copy(cameraRef.current.position)
-    state.camera.lookAt(newX, carPosition[1] + 2, newZ)
+    state.camera.lookAt(cameraRef.current.target)
 
     // Check for coin collection
     sceneObjects.coins.forEach((coinPos, index) => {
       const distance = Math.sqrt(
-        Math.pow(newX - coinPos[0], 2) +
-        Math.pow(newZ - coinPos[2], 2)
+        Math.pow(newPosition[0] - coinPos[0], 2) +
+        Math.pow(newPosition[2] - coinPos[2], 2)
       )
       if (distance < 2) {
         setScore(prev => prev + COIN_VALUE)
         setScorePopups(prev => [...prev, {
+          id: Date.now(),
           position: [coinPos[0], coinPos[1] + 2, coinPos[2]],
-          value: COIN_VALUE,
-          id: Date.now()
+          value: COIN_VALUE
         }])
         sceneObjects.coins.splice(index, 1)
       }
     })
 
     // Update score popups
-    setScorePopups(prev => prev.filter(popup => {
-      popup.position[1] += 0.1
-      return popup.position[1] < 10
-    }))
+    setScorePopups(prev => prev.filter(popup => popup.opacity > 0))
   })
 
   const handleKeyDown = (e) => {
@@ -323,27 +389,21 @@ export default function GameScene() {
       case 'w':
       case 'arrowup':
         keys.current.forward = true
-        setSpeed(CAR_SPEED)
         break
       case 's':
       case 'arrowdown':
         keys.current.backward = true
-        setSpeed(-CAR_SPEED)
         break
       case 'a':
       case 'arrowleft':
-        if (currentLane > 0) { // Only allow left movement if not in leftmost lane
-          keys.current.left = true
-          setCurrentLane(prev => prev - 1) // Move one lane left
-          setCarPosition(prev => [LANE_POSITIONS[currentLane - 1], prev[1], prev[2]])
+        if (currentLane > 0) {
+          setCurrentLane(prev => prev - 1)
         }
         break
       case 'd':
       case 'arrowright':
-        if (currentLane < 2) { // Only allow right movement if not in rightmost lane
-          keys.current.right = true
-          setCurrentLane(prev => prev + 1) // Move one lane right
-          setCarPosition(prev => [LANE_POSITIONS[currentLane + 1], prev[1], prev[2]])
+        if (currentLane < 2) {
+          setCurrentLane(prev => prev + 1)
         }
         break
       case 'shift':
@@ -359,12 +419,10 @@ export default function GameScene() {
       case 'w':
       case 'arrowup':
         keys.current.forward = false
-        setSpeed(0)
         break
       case 's':
       case 'arrowdown':
         keys.current.backward = false
-        setSpeed(0)
         break
       case 'a':
       case 'arrowleft':
@@ -373,6 +431,9 @@ export default function GameScene() {
       case 'd':
       case 'arrowright':
         keys.current.right = false
+        break
+      case 'shift':
+        keys.current.boost = false
         break
     }
   }
@@ -386,36 +447,42 @@ export default function GameScene() {
     }
   }, [gameOver])
 
+  // Handle retry key press
+  useEffect(() => {
+    const handleKeyPress = (e) => {
+      if (gameOver && e.key.toLowerCase() === 'r') {
+        resetGame()
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyPress)
+    return () => window.removeEventListener('keydown', handleKeyPress)
+  }, [gameOver])
+
   return (
     <>
-      {/* Car */}
-      <mesh ref={carRef} castShadow receiveShadow>
-        <primitive 
-          object={carScene} 
-          scale={0.45}
-          rotation={[0, 0, 0]}
-          position={carPosition}
-        />
-      </mesh>
+      {/* Score and Timer Display */}
+      <group position={[carPosition[0], carPosition[1], carPosition[2]]}>
+        <ScoreDisplay score={score} time={gameTime} />
+      </group>
 
-      {/* Score Popups */}
-      {scorePopups.map(popup => (
-        <ScorePopup key={popup.id} position={popup.position} value={popup.value} />
+      {/* Ground segments */}
+      {Array.from({ length: GROUND_SEGMENTS }).map((_, i) => (
+        <mesh 
+          key={`ground-${i}`} 
+          rotation={[-Math.PI / 2, 0, 0]} 
+          position={[0, -0.1, i * GROUND_SEGMENT_LENGTH - GROUND_SEGMENT_LENGTH * 2]} 
+          receiveShadow
+        >
+          <planeGeometry args={[ROAD_WIDTH * 4, GROUND_SEGMENT_LENGTH]} />
+          <meshStandardMaterial color="#3b7339" roughness={1} />
+        </mesh>
       ))}
 
-      {/* Game Over Screen */}
-      {gameOver && (
-        <GameOverScreen 
-          score={score} 
-          highScores={highScores} 
-          onRetry={resetGame}
-        />
-      )}
-
-      {/* Road - Simple plane */}
-      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0, 0]} receiveShadow>
+      {/* Road */}
+      <mesh rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
         <planeGeometry args={[ROAD_WIDTH, ROAD_LENGTH]} />
-        <meshStandardMaterial color="#555555" roughness={0.8} />
+        <meshStandardMaterial color="#444444" />
       </mesh>
 
       {/* Road markings */}
@@ -424,49 +491,67 @@ export default function GameScene() {
         <meshStandardMaterial color="#ffffff" roughness={0.3} />
       </mesh>
 
-      {/* Trees */}
-      {sceneObjects.trees.map((position, index) => (
-        <Tree key={`tree-${index}`} position={position} />
-      ))}
+      {/* Car */}
+      <group ref={carRef}>
+        <Car
+          selectedCar={selectedCar}
+          position={carPosition}
+        />
+      </group>
 
-      {/* Obstacles */}
-      {sceneObjects.obstacles.map((position, index) => (
-        <Obstacle key={`obstacle-${index}`} position={position} />
+      {/* Scene Objects */}
+      {sceneObjects.trees.map((pos, i) => (
+        <Tree key={`tree-${i}`} position={pos} />
       ))}
-
-      {/* Coins */}
-      {sceneObjects.coins.map((position, index) => (
-        <Coin 
-          key={`coin-${index}`} 
-          position={position}
-          onCollect={() => setScore(prev => prev + COIN_VALUE)}
+      
+      {sceneObjects.obstacles.map((pos, i) => (
+        <Obstacle
+          key={`obstacle-${i}`}
+          position={pos}
+          onCollide={() => {
+            if (!collisionCooldown) {
+              setCollisionCooldown(true)
+              setScore(prev => prev + COLLISION_PENALTY)
+              setScorePopups(prev => [...prev, {
+                id: Date.now(),
+                position: [...carPosition],
+                value: COLLISION_PENALTY
+              }])
+              setSpeed(0)
+              api.velocity.set(0, 0, 0)
+              setTimeout(() => setCollisionCooldown(false), COLLISION_COOLDOWN)
+            }
+          }}
+        />
+      ))}
+      
+      {sceneObjects.coins.map((pos, i) => (
+        <Coin
+          key={`coin-${i}`}
+          position={pos}
+          onCollect={() => {
+            setScore(prev => prev + COIN_VALUE)
+            setScorePopups(prev => [...prev, { id: Date.now(), position: pos, value: COIN_VALUE }])
+          }}
         />
       ))}
 
-      {/* Ground */}
-      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.1, 0]} receiveShadow>
-        <planeGeometry args={[ROAD_WIDTH * 4, ROAD_LENGTH]} />
-        <meshStandardMaterial color="#3b7339" roughness={1} />
-      </mesh>
+      {/* Score Popups */}
+      {scorePopups.map(popup => (
+        <ScorePopup
+          key={popup.id}
+          position={popup.position}
+          value={popup.value}
+        />
+      ))}
 
-      {/* Lighting */}
-      <ambientLight intensity={0.5} />
-      <directionalLight
-        position={[10, 10, 5]}
-        intensity={1}
-        castShadow
-        shadow-mapSize-width={2048}
-        shadow-mapSize-height={2048}
-      />
-
-      <hemisphereLight
-        skyColor="#87ceeb"
-        groundColor="#444444"
-        intensity={0.5}
-      />
-
-      {/* Fog for depth effect */}
-      <fog attach="fog" args={["#87ceeb", 50, 500]} />
+      {/* Game Over Popup */}
+      {gameOver && (
+        <GameOverPopup
+          score={score}
+          onRetry={resetGame}
+        />
+      )}
     </>
   )
 }
