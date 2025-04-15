@@ -5,7 +5,7 @@ import { useBox, useSphere } from '@react-three/cannon'
 import { Vector3, MathUtils } from 'three'
 import Car from './Car'
 
-const CAR_SPEED = 0.75
+const CAR_SPEED = 1
 const LANE_CHANGE_SPEED = 0.2
 const BOOST_MULTIPLIER = 2
 const BOOST_DURATION = 3000
@@ -25,7 +25,7 @@ const OBSTACLE_COUNT = 50
 const COIN_COUNT = 100
 const LANE_WIDTH = ROAD_WIDTH / 3
 const LANE_POSITIONS = [-LANE_WIDTH, 0, LANE_WIDTH] // Left, Center, Right lanes
-const GROUND_SEGMENT_LENGTH = 1000
+const GROUND_SEGMENT_LENGTH = 10000
 const GROUND_SEGMENTS = 5
 
 function Tree({ position }) {
